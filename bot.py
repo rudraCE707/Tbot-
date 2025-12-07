@@ -19,66 +19,72 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="I'm a bot created by Rudra! Send me a message.")
-
-# Store chat history: chat_id -> list of messages
-chat_histories = {}
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="I'm a bot created by Ru! Send me a message.")
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
-    chat_id = update.effective_chat.id
     
-    # Initialize history for this chat if not present
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = []
-    
-    # Add user message to history
-    chat_histories[chat_id].append({"role": "user", "content": user_message})
-    
-    # Keep only last 10 messages (5 exchanges)
-    if len(chat_histories[chat_id]) > 10:
-        chat_histories[chat_id] = chat_histories[chat_id][-10:]
-        
-    # Prepare messages for API call (system prompt + history)
-    messages = [
-        {
-            "role": "system",
-            "content": "You are an AI designed by Rudra to help pentesters and security researchers. Answer the user in brief."
-        }
-    ] + chat_histories[chat_id]
-
-    models = [
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
-        "meta-llama/llama-4-scout-17b-16e-instruct"
-    ]
-
-    response_content = None
-    
-    for model in models:
-        try:
-            logging.info(f"Trying model: {model}")
-            chat_completion = client.chat.completions.create(
-                messages=messages,
-                model=model,
-            )
-            response_content = chat_completion.choices[0].message.content
-            break # Success, exit loop
-        except Exception as e:
-            logging.error(f"Error with model {model}: {e}")
-            continue # Try next model
-
-    if response_content:
-        # Add assistant response to history
-        chat_histories[chat_id].append({"role": "assistant", "content": response_content})
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "You are an AI designed by Rudra to help pentesters, AI/ML enthusiasts and security researchers. Answer the following question of the user in brief: " + user_message,
+                }
+            ],
+            model="openai/gpt-oss-120b",
+        )
+        response_content = chat_completion.choices[0].message.content
         
         # Split message if it's too long for Telegram (limit is 4096 chars)
         max_length = 4096
         for i in range(0, len(response_content), max_length):
             chunk = response_content[i:i+max_length]
-            await context.bot.send_message(chat_id=chat_id, text=chunk)
-    else:
-        await context.bot.send_message(chat_id=chat_id, text="Sorry, I tried all available models but couldn't generate a response.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
+    except Exception as e:
+        logging.error(f"Error getting response from Groq: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Sorry, I encountered an error processing your request.")
+
+import base64
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    photo_file = await update.message.photo[-1].get_file()
+    
+    # Download file to memory
+    from io import BytesIO
+    image_stream = BytesIO()
+    await photo_file.download_to_memory(out=image_stream)
+    image_stream.seek(0)
+    
+    # Encode to base64
+    base64_image = base64.b64encode(image_stream.read()).decode('utf-8')
+    
+    user_caption = update.message.caption or "What is in this image?"
+
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_caption},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                            },
+                        },
+                    ],
+                }
+            ],
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
+        )
+        response_content = chat_completion.choices[0].message.content
+        await context.bot.send_message(chat_id=chat_id, text=response_content)
+    except Exception as e:
+        logging.error(f"Error analyzing image: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="Sorry, I couldn't analyze that image.")
 
 if __name__ == '__main__':
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -94,9 +100,11 @@ if __name__ == '__main__':
     
     start_handler = CommandHandler('start', start)
     chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), chat)
+    photo_handler = MessageHandler(filters.PHOTO, handle_photo)
     
     application.add_handler(start_handler)
     application.add_handler(chat_handler)
+    application.add_handler(photo_handler)
     
     print("Bot is running...")
     application.run_polling()
